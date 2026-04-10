@@ -14,10 +14,7 @@ spec:
     metadata:
       labels:
         app: aks-watcher-backend
-        # Required for Azure Workload Identity to inject the OIDC token.
-        azure.workload.identity/use: "true"
     spec:
-      serviceAccountName: aks-watcher-backend
 
       containers:
         - name: aks-watcher-backend
@@ -41,6 +38,21 @@ spec:
                   name: aks-watcher-backend
                   key: AZURE_RESOURCE_GROUP
                   optional: true
+            - name: AZURE_TENANT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: aks-watcher-azure-creds
+                  key: AZURE_TENANT_ID
+            - name: AZURE_CLIENT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: aks-watcher-azure-creds
+                  key: AZURE_CLIENT_ID
+            - name: AZURE_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: aks-watcher-azure-creds
+                  key: AZURE_CLIENT_SECRET
 
           livenessProbe:
             httpGet:
