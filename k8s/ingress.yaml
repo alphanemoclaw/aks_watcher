@@ -63,7 +63,7 @@ spec:
     - host: asl.serveblog.net
       http:
         paths:
-          - path: /aks-watcher(/|$)(.*)
+          - path: /aks-watcher(?!/api)(/|$)(.*)
             pathType: ImplementationSpecific
             backend:
               service:
