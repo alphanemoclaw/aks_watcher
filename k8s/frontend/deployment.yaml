@@ -18,7 +18,7 @@ spec:
       containers:
         - name: aks-watcher-frontend
           # Image tag is updated automatically by the CI deploy job.
-          image: ghcr.io/alphanemoclaw/aks_watcher/frontend:latest
+          image: ghcr.io/alphanemoclaw/aks_watcher/frontend:sha-debc8bc
           ports:
             - name: http
               containerPort: 80
