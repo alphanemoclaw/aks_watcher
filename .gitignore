@@ -1,0 +1,46 @@
+# ─── Go ───────────────────────────────────────────────────────────────────────
+# Compiled binaries and executables
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+aks-watcher
+
+# Test & coverage output
+*.test
+*.out
+coverage.html
+
+# ─── Frontend (Node / Vite) ───────────────────────────────────────────────────
+# Dependencies — restored with `npm install`; never commit these
+frontend/node_modules/
+
+# Vite production build output — recreated with `npm run build`
+frontend/dist/
+
+# Vite cache
+frontend/.vite/
+
+# TypeScript build info cache
+frontend/*.tsbuildinfo
+
+# ─── Environment & secrets ────────────────────────────────────────────────────
+# Local env files may contain subscription IDs, keys, or tokens
+.env
+.env.*
+!.env.example        # allow a committed example/template file
+
+# ─── IDE & editors ───────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# ─── OS ──────────────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini

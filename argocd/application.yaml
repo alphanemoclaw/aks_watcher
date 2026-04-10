@@ -1,0 +1,37 @@
+# Apply this once to register the app with ArgoCD:
+#   kubectl apply -f argocd/application.yaml -n argocd
+#
+# After that, ArgoCD takes over: every git push that changes k8s/ will
+# automatically sync to the cluster.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: aks-watcher
+  namespace: argocd
+  # Cascade deletion: removing this Application also removes all k8s resources.
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: alpha-nemoclaw-project
+
+  source:
+    # Replace with your actual repository URL.
+    repoURL: https://github.com/alphanemoclaw/aks_watcher
+    targetRevision: main
+    # ArgoCD watches everything under k8s/ (all subdirectories are included).
+    path: k8s
+
+  destination:
+    # Deploy into the same cluster where ArgoCD is running.
+    server: https://kubernetes.default.svc
+    namespace: aks-watcher
+
+  syncPolicy:
+    automated:
+      # Remove resources from the cluster when they are deleted from git.
+      prune: true
+      # Revert manual kubectl edits so git stays the single source of truth.
+      selfHeal: true
+    syncOptions:
+      # Create the namespace if it doesn't exist yet (reads namespace.yaml).
+      - CreateNamespace=true

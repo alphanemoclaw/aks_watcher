@@ -1,0 +1,68 @@
+# ── Backend ingress ────────────────────────────────────────────────────────────
+# No rewrite: the Go mux registers routes as /api/..., so the full path
+# must reach the backend unchanged.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: aks-watcher-backend
+  namespace: aks-watcher
+  annotations:
+    kubernetes.io/ingress.class: nginx
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+spec:
+  tls:
+    - hosts:
+        - asl.serveblog.net
+      secretName: aks-watcher-tls
+  rules:
+    - host: asl.serveblog.net
+      http:
+        paths:
+          - path: /api
+            pathType: Prefix
+            backend:
+              service:
+                name: aks-watcher-backend
+                port:
+                  number: 8080
+---
+# ── Frontend ingress ───────────────────────────────────────────────────────────
+# Strips the /aks-watcher prefix before forwarding to nginx so the container
+# always receives requests rooted at /.
+#
+# How the rewrite works:
+#   /aks-watcher        → /
+#   /aks-watcher/       → /
+#   /aks-watcher/assets/index.js → /assets/index.js
+#
+# Vite is built with base: '/aks-watcher/' so all asset <script>/<link> tags
+# in index.html reference /aks-watcher/assets/... — the ingress rewrites those
+# requests back to /assets/... before nginx sees them.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: aks-watcher-frontend
+  namespace: aks-watcher
+  annotations:
+    kubernetes.io/ingress.class: nginx
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+    nginx.ingress.kubernetes.io/use-regex: "true"
+    nginx.ingress.kubernetes.io/rewrite-target: /$2
+spec:
+  tls:
+    - hosts:
+        - asl.serveblog.net
+      # Same secret as the backend ingress — cert-manager is idempotent on
+      # secretName, so the certificate is only issued once.
+      secretName: aks-watcher-tls
+  rules:
+    - host: asl.serveblog.net
+      http:
+        paths:
+          - path: /aks-watcher(/|$)(.*)
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: aks-watcher-frontend
+                port:
+                  number: 80

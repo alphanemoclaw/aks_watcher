@@ -1,0 +1,70 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: aks-watcher-backend
+  namespace: aks-watcher
+  labels:
+    app: aks-watcher-backend
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: aks-watcher-backend
+  template:
+    metadata:
+      labels:
+        app: aks-watcher-backend
+        # Required for Azure Workload Identity to inject the OIDC token.
+        azure.workload.identity/use: "true"
+    spec:
+      serviceAccountName: aks-watcher-backend
+
+      containers:
+        - name: aks-watcher-backend
+          # Image tag is updated automatically by the CI deploy job.
+          image: ghcr.io/alphanemoclaw/aks_watcher/backend:latest
+          ports:
+            - name: http
+              containerPort: 8080
+
+          env:
+            - name: PORT
+              value: "8080"
+            - name: AZURE_SUBSCRIPTION_ID
+              valueFrom:
+                configMapKeyRef:
+                  name: aks-watcher-backend
+                  key: AZURE_SUBSCRIPTION_ID
+            - name: AZURE_RESOURCE_GROUP
+              valueFrom:
+                configMapKeyRef:
+                  name: aks-watcher-backend
+                  key: AZURE_RESOURCE_GROUP
+                  optional: true
+
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 30
+            failureThreshold: 3
+
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            failureThreshold: 3
+
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 256Mi
+
+      # Only pull if the digest changed — avoids rate-limit issues on GHCR.
+      imagePullPolicy: IfNotPresent

@@ -1,0 +1,13 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: aks-watcher-frontend
+  namespace: aks-watcher
+spec:
+  type: ClusterIP
+  selector:
+    app: aks-watcher-frontend
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
