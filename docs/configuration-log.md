@@ -1,49 +1,41 @@
-# Azure Workload Identity Setup Log
+# Azure Authentication Setup Log
 
-This document records the steps we took to configure Azure Workload Identity for the `aks-watcher` service. Sensitive information, such as the exact Subscription ID, Tenant ID, and Managed Identity Client ID, have been intentionally removed and replaced with placeholders to keep this secure.
+This document records the steps taken to configure Azure authentication for the `aks-watcher` service running on a bare-metal Kubernetes cluster.
+
+> **Note:** Workload Identity is AKS-specific and cannot be used on bare-metal clusters. The app uses a Service Principal with credentials injected via a Kubernetes Secret instead.
 
 ## Environment Details
 
 - **Target Azure Resource Group:** `aks_watcher`
-- **Target AKS Cluster:** `aks_watcher_cluster`
+- **Observed AKS Cluster:** `aks_watcher_cluster`
 - **Kubernetes Namespace:** `aks-watcher`
-- **Kubernetes ServiceAccount:** `aks-watcher-backend`
-- **Azure Managed Identity Name:** `aks-watcher-identity`
+- **Hosting:** Bare-metal Kubernetes cluster (not AKS)
 
 ## Steps Executed
 
-### 1. Enabled OIDC Issuer and Workload Identity
-We first updated the AKS cluster to support Workload Identity and OIDC:
+### 1. Created a Service Principal with Reader access
+
 ```bash
-az aks update -g aks_watcher -n aks_watcher_cluster --enable-oidc-issuer --enable-workload-identity
+az ad sp create-for-rbac \
+  --name aks-watcher \
+  --role Reader \
+  --scopes /subscriptions/<SUBSCRIPTION_ID>
 ```
 
-### 2. Created the Managed Identity
-We created a User-Assigned Managed Identity that the backend pods will use to authenticate to Azure:
+This outputs `appId`, `password`, and `tenant` — these are the credentials used by the backend.
+
+### 2. Created the Kubernetes Secret
+
+The credentials are stored as a Kubernetes Secret and injected into the backend pod as environment variables. The secret is never committed to git.
+
 ```bash
-az identity create -g aks_watcher -n aks-watcher-identity
+kubectl create secret generic aks-watcher-azure-creds \
+  --from-literal=AZURE_TENANT_ID=<tenant> \
+  --from-literal=AZURE_CLIENT_ID=<appId> \
+  --from-literal=AZURE_CLIENT_SECRET=<password> \
+  -n aks-watcher
 ```
 
-### 3. Assigned the Reader Role
-To allow the backend to read the AKS cluster list from the Azure Management API, we granted the Managed Identity the `Reader` role against the subscription:
-```bash
-az role assignment create --role Reader --assignee <CLIENT_ID> --scope /subscriptions/<SUBSCRIPTION_ID>
-```
+### 3. How it works at runtime
 
-### 4. Created the Federated Credential
-We established the trust relationship between the Azure Managed Identity and the Kubernetes ServiceAccount (`aks-watcher-backend`) using the cluster's OIDC issuer URL:
-```bash
-# 1. Fetched the OIDC Issuer URL:
-# OIDC_ISSUER=$(az aks show -g aks_watcher -n aks_watcher_cluster --query oidcIssuerProfile.issuerURL -o tsv)
-
-# 2. Linked the identities:
-az identity federated-credential create \
-  --name aks-watcher-backend \
-  --identity-name aks-watcher-identity \
-  --resource-group aks_watcher \
-  --issuer <OIDC_ISSUER_URL> \
-  --subject system:serviceaccount:aks-watcher:aks-watcher-backend
-```
-
-### 5. Configured the Kubernetes ServiceAccount
-Finally, we annotated the ServiceAccount with the client ID (this is now templated with `<YOUR_MANAGED_IDENTITY_CLIENT_ID>` in `k8s/backend/serviceaccount.yaml` to hide our actual client ID).
+The backend uses `DefaultAzureCredential` from the Azure SDK. When `AZURE_TENANT_ID`, `AZURE_CLIENT_ID`, and `AZURE_CLIENT_SECRET` are present as environment variables, it automatically uses `EnvironmentCredential` (Service Principal auth) without any code change.

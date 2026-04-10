@@ -8,84 +8,56 @@ A lightweight dashboard that gives you a live overview of every AKS cluster in a
 Browser
   └─► nginx (frontend container)
         ├─ serves the React SPA for all non-API paths
-        └─► /api/* proxied by the ingress to the Go backend
-              └─► Azure Management API (via Workload Identity)
+        └─► /aks-watcher/api/* proxied by the ingress to the Go backend
+              └─► Azure Management API (via Service Principal)
                     └─► returns AKS cluster list
 ```
 
-**Backend (`main.go`)** — A Go HTTP server that calls the Azure Resource Manager REST API to list AKS clusters. It uses `DefaultAzureCredential`, which works locally via `az login` and in Kubernetes via Workload Identity — no code change needed between environments. Exposes two endpoints:
+**Backend (`main.go`)** — A Go HTTP server that calls the Azure Resource Manager REST API to list AKS clusters. It uses `DefaultAzureCredential`, which works locally via `az login` and in Kubernetes via environment variables (Service Principal) — no code change needed between environments. Exposes two endpoints:
 
 | Endpoint | Description |
 |---|---|
-| `GET /api/clusters/summary` | Returns JSON array of all AKS clusters in scope |
+| `GET /aks-watcher/api/clusters/summary` | Returns JSON array of all AKS clusters in scope |
 | `GET /healthz` | Liveness/readiness probe — returns `ok` |
 
-**Frontend (`frontend/`)** — A React + TypeScript single-page app built with Vite and styled with Tailwind CSS. It polls `/api/clusters/summary` every 60 seconds and displays each cluster as a card showing name, region, Kubernetes version, power state, and provisioning state.
+**Frontend (`frontend/`)** — A React + TypeScript single-page app built with Vite and styled with Tailwind CSS. It polls `/aks-watcher/api/clusters/summary` every 60 seconds and displays each cluster as a card showing name, region, Kubernetes version, power state, and provisioning state.
 
 ---
 
 ## Prerequisites
 
 - An Azure subscription with at least one AKS cluster
-- A Kubernetes cluster with:
+- A Kubernetes cluster (bare-metal or cloud) with:
   - [nginx-ingress](https://kubernetes.github.io/ingress-nginx/) controller
   - [cert-manager](https://cert-manager.io/) with a `ClusterIssuer` named `letsencrypt-prod`
   - [ArgoCD](https://argo-cd.readthedocs.io/) (for GitOps deployment)
-  - Workload Identity enabled (`--enable-oidc-issuer --enable-workload-identity`)
+- An Azure Service Principal with `Reader` role on the target subscription
 
 ---
 
 ## Azure setup (one-time)
 
-> **Note:** For a log of the exact commands executed to set up Workload Identity on our environment (`aks_watcher_cluster`), see the [Configuration Log](docs/configuration-log.md).
-
-### 1. Enable Workload Identity on your AKS cluster
+### 1. Create a Service Principal and grant it Reader access
 
 ```bash
-az aks update \
-  --resource-group <CLUSTER_RG> \
-  --name <CLUSTER_NAME> \
-  --enable-oidc-issuer \
-  --enable-workload-identity
-```
-
-### 2. Create a Managed Identity and grant it Reader access
-
-```bash
-# Create the identity
-az identity create \
-  --resource-group <CLUSTER_RG> \
-  --name aks-watcher-identity
-
-# Grab the client ID for later
-CLIENT_ID=$(az identity show \
-  --resource-group <CLUSTER_RG> \
-  --name aks-watcher-identity \
-  --query clientId -o tsv)
-
-# Grant Reader on the subscription (or scope it to a resource group)
-az role assignment create \
+az ad sp create-for-rbac \
+  --name aks-watcher \
   --role Reader \
-  --assignee $CLIENT_ID \
-  --scope /subscriptions/<SUBSCRIPTION_ID>
+  --scopes /subscriptions/<SUBSCRIPTION_ID>
 ```
 
-### 3. Create a federated credential
+Save the output — you will need `appId`, `password`, and `tenant` in the next step.
 
-This links the Azure identity to the Kubernetes ServiceAccount so pods can authenticate without any stored secrets.
+### 2. Create the Kubernetes Secret
+
+The secret is created directly on the cluster and is never stored in git.
 
 ```bash
-OIDC_ISSUER=$(az aks show \
-  --resource-group <CLUSTER_RG> \
-  --name <CLUSTER_NAME> \
-  --query oidcIssuerProfile.issuerURL -o tsv)
-
-az identity federated-credential create \
-  --name aks-watcher-backend \
-  --identity-name aks-watcher-identity \
-  --resource-group <CLUSTER_RG> \
-  --issuer $OIDC_ISSUER \
-  --subject system:serviceaccount:aks-watcher:aks-watcher-backend
+kubectl create secret generic aks-watcher-azure-creds \
+  --from-literal=AZURE_TENANT_ID=<tenant> \
+  --from-literal=AZURE_CLIENT_ID=<appId> \
+  --from-literal=AZURE_CLIENT_SECRET=<password> \
+  -n aks-watcher
 ```
 
 ---
@@ -99,11 +71,6 @@ az identity federated-credential create \
 AZURE_SUBSCRIPTION_ID: "<YOUR_SUBSCRIPTION_ID>"
 # Optional: leave empty to scan the whole subscription
 AZURE_RESOURCE_GROUP: ""
-```
-
-**`k8s/backend/serviceaccount.yaml`** — set the Managed Identity client ID from step 2 above:
-```yaml
-azure.workload.identity/client-id: "<YOUR_MANAGED_IDENTITY_CLIENT_ID>"
 ```
 
 ### 2. Register the ArgoCD Application
@@ -170,6 +137,9 @@ npm run dev
 |---|---|---|---|
 | `AZURE_SUBSCRIPTION_ID` | Yes* | — | Subscription to scan |
 | `AZURE_RESOURCE_GROUP` | No | — | Restrict to one resource group |
+| `AZURE_TENANT_ID` | Yes* | — | Service Principal tenant ID |
+| `AZURE_CLIENT_ID` | Yes* | — | Service Principal app ID |
+| `AZURE_CLIENT_SECRET` | Yes* | — | Service Principal password |
 | `PORT` | No | `8080` | HTTP listen port |
 | `MOCK_MODE` | No | `false` | Return fake data, skip Azure calls |
 
