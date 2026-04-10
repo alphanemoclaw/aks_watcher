@@ -20,6 +20,8 @@ spec:
     targetRevision: main
     # ArgoCD watches everything under k8s/ (all subdirectories are included).
     path: k8s
+    directory:
+      recurse: true
 
   destination:
     # Deploy into the same cluster where ArgoCD is running.
