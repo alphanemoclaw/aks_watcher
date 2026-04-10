@@ -11,7 +11,7 @@ export default defineConfig({
     // Proxy /api calls to the Go backend during local development so you
     // never have to hard-code the backend URL or deal with CORS in dev.
     proxy: {
-      '/api': {
+      '/aks-watcher/api': {
         target: 'http://localhost:8080',
         changeOrigin: true,
       },

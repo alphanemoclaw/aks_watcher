@@ -1,5 +1,5 @@
 # ── Backend ingress ────────────────────────────────────────────────────────────
-# No rewrite: the Go mux registers routes as /api/..., so the full path
+# No rewrite: the Go mux registers routes as /aks-watcher/api/..., so the full path
 # must reach the backend unchanged.
 apiVersion: networking.k8s.io/v1
 kind: Ingress
@@ -20,7 +20,7 @@ spec:
     - host: asl.serveblog.net
       http:
         paths:
-          - path: /api
+          - path: /aks-watcher/api
             pathType: Prefix
             backend:
               service:

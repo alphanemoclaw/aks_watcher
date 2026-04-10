@@ -357,7 +357,7 @@ func main() {
 	}
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /api/clusters/summary", h.handleClustersSummary)
+	mux.HandleFunc("GET /aks-watcher/api/clusters/summary", h.handleClustersSummary)
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprint(w, "ok")
 	})

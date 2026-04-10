@@ -33,7 +33,7 @@ interface ClusterSummary {
 // In production (Kubernetes), set it to the backend service URL, e.g.
 //   VITE_API_BASE_URL=http://aks-watcher-backend-svc:8080
 const API_URL =
-  (import.meta.env.VITE_API_BASE_URL ?? '') + '/api/clusters/summary'
+  (import.meta.env.VITE_API_BASE_URL ?? '') + '/aks-watcher/api/clusters/summary'
 
 const POLL_INTERVAL_MS = 60_000 // 60 s
 
