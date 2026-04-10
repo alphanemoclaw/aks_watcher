@@ -7,9 +7,11 @@ metadata:
   name: aks-watcher-backend
   namespace: aks-watcher
   annotations:
-    kubernetes.io/ingress.class: nginx
     cert-manager.io/cluster-issuer: letsencrypt-http01
+    nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/ssl-redirect-port: "8443"
 spec:
+  ingressClassName: nginx
   tls:
     - hosts:
         - asl.serveblog.net
@@ -44,11 +46,13 @@ metadata:
   name: aks-watcher-frontend
   namespace: aks-watcher
   annotations:
-    kubernetes.io/ingress.class: nginx
     cert-manager.io/cluster-issuer: letsencrypt-http01
+    nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/ssl-redirect-port: "8443"
     nginx.ingress.kubernetes.io/use-regex: "true"
     nginx.ingress.kubernetes.io/rewrite-target: /$2
 spec:
+  ingressClassName: nginx
   tls:
     - hosts:
         - asl.serveblog.net
