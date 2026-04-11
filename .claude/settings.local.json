@@ -1,9 +1,0 @@
-{
-  "permissions": {
-    "allow": [
-      "Bash(curl -s \"https://proxy.golang.org/github.com/!azure/azure-sdk-for-go/sdk/resourcemanager/containerservice/armcontainerservice/@v/list\")",
-      "Bash(curl -s \"https://proxy.golang.org/github.com/!azure/azure-sdk-for-go/sdk/resourcemanager/containerservice/armcontainerservice/v2/@v/list\")",
-      "Bash(curl -s \"https://proxy.golang.org/github.com/!azure/azure-sdk-for-go/sdk/resourcemanager/containerservice/armcontainerservice/v5/@v/list\")"
-    ]
-  }
-}
