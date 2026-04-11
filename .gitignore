@@ -31,6 +31,9 @@ frontend/*.tsbuildinfo
 .env.*
 !.env.example        # allow a committed example/template file
 
+# ─── Claude Code ─────────────────────────────────────────────────────────────
+.claude/
+
 # ─── IDE & editors ───────────────────────────────────────────────────────────
 .vscode/
 .idea/
