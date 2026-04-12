@@ -19,7 +19,7 @@ spec:
       containers:
         - name: aks-watcher-backend
           # Image tag is updated automatically by the CI deploy job.
-          image: ghcr.io/alphanemoclaw/aks_watcher/backend:sha-1af1ebd
+          image: ghcr.io/alphanemoclaw/aks_watcher/backend:sha-70fe015
           ports:
             - name: http
               containerPort: 8080
