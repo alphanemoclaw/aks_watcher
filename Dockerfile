@@ -1,7 +1,7 @@
 # ─── Stage 1: Build ───────────────────────────────────────────────────────────
 # Use the official Go image only for compilation; it will NOT ship in the
 # final image.
-FROM golang:1.22-alpine AS builder
+FROM golang:1.25-alpine AS builder
 
 WORKDIR /app
 
