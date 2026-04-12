@@ -13,14 +13,15 @@ Browser
                     └─► returns AKS cluster list
 ```
 
-**Backend (`main.go`)** — A Go HTTP server that calls the Azure Resource Manager REST API to list AKS clusters. It uses `DefaultAzureCredential`, which works locally via `az login` and in Kubernetes via environment variables (Service Principal) — no code change needed between environments. Exposes two endpoints:
+**Backend (`main.go`)** — A Go HTTP server that calls the Azure Resource Manager REST API to list AKS clusters. It uses `DefaultAzureCredential`, which works locally via `az login` and in Kubernetes via environment variables (Service Principal) — no code change needed between environments. Live status data (is_live, set_live_at, planned_live_at) is persisted in a local SQLite database. Exposes the following endpoints:
 
 | Endpoint | Description |
 |---|---|
-| `GET /aks-watcher/api/clusters/summary` | Returns JSON array of all AKS clusters in scope |
+| `GET /aks-watcher/api/clusters/summary` | Returns JSON array of all AKS clusters merged with live status |
+| `PUT /aks-watcher/api/clusters/live-status` | Saves or updates the live status for a cluster |
 | `GET /healthz` | Liveness/readiness probe — returns `ok` |
 
-**Frontend (`frontend/`)** — A React + TypeScript single-page app built with Vite and styled with Tailwind CSS. It polls `/aks-watcher/api/clusters/summary` every 60 seconds and displays each cluster as a card showing name, region, Kubernetes version, power state, and provisioning state.
+**Frontend (`frontend/`)** — A React + TypeScript single-page app built with Vite and styled with Tailwind CSS. It polls `/aks-watcher/api/clusters/summary` every 60 seconds and displays each cluster as a card showing name, region, Kubernetes version, power state, provisioning state, and live status. Clicking a card opens a modal to manually manage the cluster's live status.
 
 ---
 
@@ -79,7 +80,7 @@ AZURE_RESOURCE_GROUP: ""
 kubectl apply -f argocd/application.yaml -n argocd
 ```
 
-ArgoCD will immediately sync the `k8s/` directory to the cluster, creating the namespace, deployments, services, and ingress. cert-manager will automatically provision a TLS certificate for the configured hostname.
+ArgoCD will immediately sync the `k8s/` directory to the cluster, creating the namespace, deployments, services, ingress, and PersistentVolumeClaim for the SQLite database. cert-manager will automatically provision a TLS certificate for the configured hostname.
 
 ---
 
@@ -103,6 +104,9 @@ services:
     environment:
       AZURE_SUBSCRIPTION_ID: "<YOUR_SUBSCRIPTION_ID>"
       # MOCK_MODE: "true"   # uncomment to run without Azure credentials
+      DB_PATH: /data/aks-watcher.db
+    volumes:
+      - backend-data:/data
     ports:
       - "8080:8080"
 
@@ -112,6 +116,9 @@ services:
       - "80:80"
     # When not running behind a path-stripping ingress, set the API base URL:
     # The frontend is built with base '/aks-watcher/' — see note below.
+
+volumes:
+  backend-data:
 ```
 
 > **Note on the frontend base path:** The image is built with Vite `base: '/aks-watcher/'`, meaning the app expects to be served at `/aks-watcher/`. If you serve it at a different path, rebuild the image with `--build-arg` or run locally with `npm run dev`.
@@ -119,12 +126,12 @@ services:
 ### Running locally without Docker
 
 ```bash
-# Terminal 1 — backend
+# Terminal 1 — backend (SQLite DB created as ./aks-watcher.db automatically)
 AZURE_SUBSCRIPTION_ID=<sub-id> go run .
 # Or without Azure credentials:
 MOCK_MODE=true go run .
 
-# Terminal 2 — frontend (Vite proxy rewrites /api → localhost:8080)
+# Terminal 2 — frontend (Vite proxy forwards all /aks-watcher/api/* to localhost:8080)
 cd frontend
 npm install
 npm run dev
@@ -142,6 +149,7 @@ npm run dev
 | `AZURE_CLIENT_SECRET` | Yes* | — | Service Principal password |
 | `PORT` | No | `8080` | HTTP listen port |
 | `MOCK_MODE` | No | `false` | Return fake data, skip Azure calls |
+| `DB_PATH` | No | `./aks-watcher.db` | Path to the SQLite database file |
 
 *Not required when `MOCK_MODE=true`.
 

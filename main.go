@@ -1,10 +1,7 @@
 // Package main implements a REST API that queries the Azure Management plane
 // to return a live summary of every AKS cluster in a subscription (or a
-// single resource group).
-//
-// Because this uses standard Azure REST list operations — not kubectl or
-// Run Command — responses are fast (< 1 s) and require no VPN or private
-// network access.
+// single resource group), enriched with manually-managed live status data
+// stored in a local SQLite database.
 //
 // Required environment variables
 // ───────────────────────────────
@@ -15,16 +12,12 @@
 //   AZURE_RESOURCE_GROUP    – restrict results to one resource group
 //   PORT                    – HTTP listen port (default: 8080)
 //   MOCK_MODE               – set to "true" to return fake cluster data
-//                             (skips all Azure API calls; useful for local UI dev)
-//
-// Authentication (DefaultAzureCredential tries these in order)
-// ─────────────────────────────────────────────────────────────
-//   Local  : environment variables → Azure CLI → VS Code → Azure PowerShell
-//   Azure  : Workload Identity → Managed Identity
+//   DB_PATH                 – path to the SQLite database file (default: /data/aks-watcher.db)
 package main
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -34,6 +27,7 @@ import (
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azidentity"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/containerservice/armcontainerservice/v2"
+	_ "modernc.org/sqlite"
 )
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -41,75 +35,147 @@ import (
 // ────────────────────────────────────────────────────────────────────────────
 
 // ClusterSummary is the per-cluster payload returned by the API.
-// Field names use snake_case JSON keys for easy consumption by a React frontend.
 type ClusterSummary struct {
-	// Name is the Azure resource name of the cluster.
-	Name string `json:"name"`
+	Name              string  `json:"name"`
+	ResourceGroup     string  `json:"resource_group"`
+	Location          string  `json:"location"`
+	KubernetesVersion string  `json:"kubernetes_version"`
+	ProvisioningState string  `json:"provisioning_state"`
+	PowerState        string  `json:"power_state"`
+	IsLive            bool    `json:"is_live"`
+	SetLiveAt         *string `json:"set_live_at"`
+	PlannedLiveAt     *string `json:"planned_live_at"`
+}
 
-	// ResourceGroup is the resource group the cluster belongs to.
-	ResourceGroup string `json:"resource_group"`
+// LiveStatusRequest is the payload for PUT /aks-watcher/api/clusters/live-status.
+type LiveStatusRequest struct {
+	ClusterName   string  `json:"cluster_name"`
+	ResourceGroup string  `json:"resource_group"`
+	IsLive        bool    `json:"is_live"`
+	PlannedLiveAt *string `json:"planned_live_at"`
+}
 
-	// Location is the Azure region (e.g. "eastus", "westeurope").
-	Location string `json:"location"`
+// ────────────────────────────────────────────────────────────────────────────
+// SQLite helpers
+// ────────────────────────────────────────────────────────────────────────────
 
-	// KubernetesVersion is the version reported by the control plane
-	// (e.g. "1.29.2").
-	KubernetesVersion string `json:"kubernetes_version"`
+func initDB(path string) (*sql.DB, error) {
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		return nil, fmt.Errorf("open db: %w", err)
+	}
 
-	// ProvisioningState reflects the last ARM operation result
-	// (e.g. "Succeeded", "Failed", "Updating").
-	ProvisioningState string `json:"provisioning_state"`
+	_, err = db.Exec(`
+		CREATE TABLE IF NOT EXISTS live_status (
+			cluster_name    TEXT NOT NULL,
+			resource_group  TEXT NOT NULL,
+			is_live         INTEGER NOT NULL DEFAULT 0,
+			set_live_at     TEXT,
+			planned_live_at TEXT,
+			PRIMARY KEY (cluster_name, resource_group)
+		)
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("create table: %w", err)
+	}
 
-	// PowerState reflects whether the cluster is running or deallocated
-	// (e.g. "Running", "Stopped").
-	PowerState string `json:"power_state"`
+	return db, nil
+}
+
+// fetchLiveStatuses returns a map keyed by "cluster_name|resource_group".
+func fetchLiveStatuses(db *sql.DB) (map[string]ClusterSummary, error) {
+	rows, err := db.Query(`SELECT cluster_name, resource_group, is_live, set_live_at, planned_live_at FROM live_status`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	out := make(map[string]ClusterSummary)
+	for rows.Next() {
+		var name, rg string
+		var isLive int
+		var setLiveAt, plannedLiveAt sql.NullString
+		if err := rows.Scan(&name, &rg, &isLive, &setLiveAt, &plannedLiveAt); err != nil {
+			return nil, err
+		}
+		s := ClusterSummary{IsLive: isLive == 1}
+		if setLiveAt.Valid {
+			s.SetLiveAt = &setLiveAt.String
+		}
+		if plannedLiveAt.Valid {
+			s.PlannedLiveAt = &plannedLiveAt.String
+		}
+		out[name+"|"+rg] = s
+	}
+	return out, rows.Err()
+}
+
+// upsertLiveStatus inserts or updates a live_status row.
+func upsertLiveStatus(db *sql.DB, req LiveStatusRequest) error {
+	var setLiveAt *string
+
+	// Fetch the existing row to preserve set_live_at if already set.
+	var existing sql.NullString
+	_ = db.QueryRow(
+		`SELECT set_live_at FROM live_status WHERE cluster_name = ? AND resource_group = ?`,
+		req.ClusterName, req.ResourceGroup,
+	).Scan(&existing)
+
+	if req.IsLive {
+		if existing.Valid && existing.String != "" {
+			// Already had a set_live_at — keep it.
+			setLiveAt = &existing.String
+		} else {
+			// First time being marked live — record now.
+			now := time.Now().UTC().Format(time.RFC3339)
+			setLiveAt = &now
+		}
+	}
+	// If is_live is false, set_live_at is cleared.
+
+	_, err := db.Exec(`
+		INSERT INTO live_status (cluster_name, resource_group, is_live, set_live_at, planned_live_at)
+		VALUES (?, ?, ?, ?, ?)
+		ON CONFLICT(cluster_name, resource_group) DO UPDATE SET
+			is_live         = excluded.is_live,
+			set_live_at     = excluded.set_live_at,
+			planned_live_at = excluded.planned_live_at
+	`, req.ClusterName, req.ResourceGroup, boolToInt(req.IsLive), setLiveAt, req.PlannedLiveAt)
+	return err
+}
+
+func boolToInt(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
 }
 
 // ────────────────────────────────────────────────────────────────────────────
 // Azure helpers
 // ────────────────────────────────────────────────────────────────────────────
 
-// newManagedClustersClient creates an authenticated armcontainerservice client.
-// DefaultAzureCredential works both locally (via az login) and in Azure
-// (via Managed Identity / Workload Identity) without any code change.
 func newManagedClustersClient(subscriptionID string) (*armcontainerservice.ManagedClustersClient, error) {
 	cred, err := azidentity.NewDefaultAzureCredential(nil)
 	if err != nil {
 		return nil, fmt.Errorf("create credential: %w", err)
 	}
-
 	client, err := armcontainerservice.NewManagedClustersClient(subscriptionID, cred, nil)
 	if err != nil {
 		return nil, fmt.Errorf("create ManagedClusters client: %w", err)
 	}
-
 	return client, nil
 }
 
-// listClusters fetches all AKS clusters visible to the credential.
-// If resourceGroup is non-empty, only clusters in that group are returned;
-// otherwise all clusters in the subscription are returned.
 func listClusters(ctx context.Context, client *armcontainerservice.ManagedClustersClient, resourceGroup string) ([]ClusterSummary, error) {
 	var summaries []ClusterSummary
 
-	// Choose the pager based on whether a resource group filter is active.
-	// Both pagers return the same *armcontainerservice.ManagedCluster objects,
-	// so the extraction logic below is shared.
-	var pager interface {
-		More() bool
-		NextPage(context.Context) (armcontainerservice.ManagedClustersClientListByResourceGroupResponse, error)
-	}
-
 	if resourceGroup != "" {
-		pager = client.NewListByResourceGroupPager(resourceGroup, nil)
-	} else {
-		// NewListPager returns a different concrete type, handle both branches
-		// with separate loops to keep type safety without reflection.
-		subPager := client.NewListPager(nil)
-		for subPager.More() {
-			page, err := subPager.NextPage(ctx)
+		pager := client.NewListByResourceGroupPager(resourceGroup, nil)
+		for pager.More() {
+			page, err := pager.NextPage(ctx)
 			if err != nil {
-				return nil, fmt.Errorf("list clusters page: %w", err)
+				return nil, fmt.Errorf("list clusters by resource group page: %w", err)
 			}
 			for _, c := range page.Value {
 				summaries = append(summaries, extractSummary(c))
@@ -118,22 +184,19 @@ func listClusters(ctx context.Context, client *armcontainerservice.ManagedCluste
 		return summaries, nil
 	}
 
-	// Resource-group-scoped pager path.
-	for pager.More() {
-		page, err := pager.NextPage(ctx)
+	subPager := client.NewListPager(nil)
+	for subPager.More() {
+		page, err := subPager.NextPage(ctx)
 		if err != nil {
-			return nil, fmt.Errorf("list clusters by resource group page: %w", err)
+			return nil, fmt.Errorf("list clusters page: %w", err)
 		}
 		for _, c := range page.Value {
 			summaries = append(summaries, extractSummary(c))
 		}
 	}
-
 	return summaries, nil
 }
 
-// extractSummary maps an armcontainerservice.ManagedCluster to a ClusterSummary.
-// All pointer dereferences are nil-safe; unknown fields fall back to "unknown".
 func extractSummary(c *armcontainerservice.ManagedCluster) ClusterSummary {
 	s := ClusterSummary{
 		Name:              deref(c.Name, "unknown"),
@@ -143,20 +206,16 @@ func extractSummary(c *armcontainerservice.ManagedCluster) ClusterSummary {
 		ProvisioningState: "unknown",
 		PowerState:        "unknown",
 	}
-
 	if c.Properties != nil {
 		s.KubernetesVersion = deref(c.Properties.KubernetesVersion, "unknown")
 		s.ProvisioningState = deref(c.Properties.ProvisioningState, "unknown")
-
 		if c.Properties.PowerState != nil && c.Properties.PowerState.Code != nil {
 			s.PowerState = string(*c.Properties.PowerState.Code)
 		}
 	}
-
 	return s
 }
 
-// deref safely dereferences a *string, returning fallback when nil.
 func deref(s *string, fallback string) string {
 	if s == nil {
 		return fallback
@@ -164,22 +223,16 @@ func deref(s *string, fallback string) string {
 	return *s
 }
 
-// resourceGroupFromID extracts the resource group name from a full Azure
-// resource ID string.
-// Example ID: /subscriptions/{sub}/resourceGroups/{rg}/providers/Microsoft.ContainerService/managedClusters/{name}
 func resourceGroupFromID(id string) string {
-	// Walk the path segments looking for "resourcegroups" (case-insensitive).
 	const marker = "resourcegroups"
 	i := 0
 	for i < len(id) {
-		// Find next slash
 		j := i
 		for j < len(id) && id[j] != '/' {
 			j++
 		}
 		segment := id[i:j]
 		if equalFold(segment, marker) && j+1 < len(id) {
-			// The segment after the marker is the resource group name.
 			start := j + 1
 			end := start
 			for end < len(id) && id[end] != '/' {
@@ -192,7 +245,6 @@ func resourceGroupFromID(id string) string {
 	return "unknown"
 }
 
-// equalFold is a simple ASCII case-insensitive comparison to avoid importing strings.
 func equalFold(a, b string) bool {
 	if len(a) != len(b) {
 		return false
@@ -216,104 +268,102 @@ func equalFold(a, b string) bool {
 // HTTP server
 // ────────────────────────────────────────────────────────────────────────────
 
-// corsMiddleware adds CORS headers so a React dev server (or any origin) can
-// call this API.  Restrict Access-Control-Allow-Origin in production.
 func corsMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, PUT, OPTIONS")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
-
-		// Browsers send a pre-flight OPTIONS before every cross-origin request.
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
 			return
 		}
-
 		next.ServeHTTP(w, r)
 	})
 }
 
-// handler bundles the dependencies needed by HTTP handlers.
 type handler struct {
 	client        *armcontainerservice.ManagedClustersClient
-	resourceGroup string // empty → all resource groups in the subscription
-	mockMode      bool   // when true, return fake data instead of calling Azure
+	resourceGroup string
+	mockMode      bool
+	db            *sql.DB
 }
 
-// mockClusters is the fake dataset returned when MOCK_MODE=true.
-// Edit these values to match your real environment's shape.
 var mockClusters = []ClusterSummary{
-	{
-		Name:              "prod-aks-eastus",
-		ResourceGroup:     "rg-production",
-		Location:          "eastus",
-		KubernetesVersion: "1.29.2",
-		ProvisioningState: "Succeeded",
-		PowerState:        "Running",
-	},
-	{
-		Name:              "staging-aks-westeu",
-		ResourceGroup:     "rg-staging",
-		Location:          "westeurope",
-		KubernetesVersion: "1.28.5",
-		ProvisioningState: "Succeeded",
-		PowerState:        "Running",
-	},
-	{
-		Name:              "dev-aks-eastus",
-		ResourceGroup:     "rg-development",
-		Location:          "eastus",
-		KubernetesVersion: "1.28.5",
-		ProvisioningState: "Succeeded",
-		PowerState:        "Stopped",
-	},
-	{
-		Name:              "qa-aks-centralus",
-		ResourceGroup:     "rg-qa",
-		Location:          "centralus",
-		KubernetesVersion: "1.27.9",
-		ProvisioningState: "Failed",
-		PowerState:        "Running",
-	},
+	{Name: "prod-aks-eastus", ResourceGroup: "rg-production", Location: "eastus", KubernetesVersion: "1.29.2", ProvisioningState: "Succeeded", PowerState: "Running"},
+	{Name: "staging-aks-westeu", ResourceGroup: "rg-staging", Location: "westeurope", KubernetesVersion: "1.28.5", ProvisioningState: "Succeeded", PowerState: "Running"},
+	{Name: "dev-aks-eastus", ResourceGroup: "rg-development", Location: "eastus", KubernetesVersion: "1.28.5", ProvisioningState: "Succeeded", PowerState: "Stopped"},
+	{Name: "qa-aks-centralus", ResourceGroup: "rg-qa", Location: "centralus", KubernetesVersion: "1.27.9", ProvisioningState: "Failed", PowerState: "Running"},
 }
 
-// handleClustersSummary is the main endpoint.
+// handleClustersSummary merges Azure cluster data with live status from SQLite.
 //
-//	GET /api/clusters/summary
-//
-// Calls the Azure Management API live on each request.  The list operation
-// is fast (< 1 s for most subscriptions) so no caching layer is needed.
+//	GET /aks-watcher/api/clusters/summary
 func (h *handler) handleClustersSummary(w http.ResponseWriter, r *http.Request) {
-	// In mock mode skip all Azure calls and return the hardcoded dataset.
-	// Flip back to real mode by unsetting MOCK_MODE.
+	var clusters []ClusterSummary
+
 	if h.mockMode {
-		log.Println("GET /api/clusters/summary [MOCK]")
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(mockClusters)
-		return
+		log.Println("GET /aks-watcher/api/clusters/summary [MOCK]")
+		clusters = make([]ClusterSummary, len(mockClusters))
+		copy(clusters, mockClusters)
+	} else {
+		ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+		defer cancel()
+
+		var err error
+		clusters, err = listClusters(ctx, h.client, h.resourceGroup)
+		if err != nil {
+			log.Printf("GET /aks-watcher/api/clusters/summary: %v", err)
+			http.Error(w, `{"error":"failed to list clusters"}`, http.StatusInternalServerError)
+			return
+		}
 	}
 
-	// Use a 30-second timeout — Azure list APIs are fast but we want a hard cap.
-	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
-	defer cancel()
-
-	clusters, err := listClusters(ctx, h.client, h.resourceGroup)
-	if err != nil {
-		log.Printf("GET /api/clusters/summary: %v", err)
-		http.Error(w, `{"error":"failed to list clusters"}`, http.StatusInternalServerError)
-		return
-	}
-
-	// Return an empty array rather than null when there are no clusters.
 	if clusters == nil {
 		clusters = []ClusterSummary{}
 	}
 
+	// Enrich with live status from SQLite.
+	statuses, err := fetchLiveStatuses(h.db)
+	if err != nil {
+		log.Printf("fetchLiveStatuses: %v", err)
+		// Non-fatal: return clusters without live status rather than failing.
+	} else {
+		for i, c := range clusters {
+			if s, ok := statuses[c.Name+"|"+c.ResourceGroup]; ok {
+				clusters[i].IsLive = s.IsLive
+				clusters[i].SetLiveAt = s.SetLiveAt
+				clusters[i].PlannedLiveAt = s.PlannedLiveAt
+			}
+		}
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(clusters); err != nil {
-		log.Printf("GET /api/clusters/summary: encode: %v", err)
+		log.Printf("encode clusters: %v", err)
 	}
+}
+
+// handleLiveStatus upserts the live status for a single cluster.
+//
+//	PUT /aks-watcher/api/clusters/live-status
+func (h *handler) handleLiveStatus(w http.ResponseWriter, r *http.Request) {
+	var req LiveStatusRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, `{"error":"invalid request body"}`, http.StatusBadRequest)
+		return
+	}
+	if req.ClusterName == "" || req.ResourceGroup == "" {
+		http.Error(w, `{"error":"cluster_name and resource_group are required"}`, http.StatusBadRequest)
+		return
+	}
+
+	if err := upsertLiveStatus(h.db, req); err != nil {
+		log.Printf("upsertLiveStatus: %v", err)
+		http.Error(w, `{"error":"failed to save live status"}`, http.StatusInternalServerError)
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -326,26 +376,34 @@ func main() {
 		port = "8080"
 	}
 
+	dbPath := os.Getenv("DB_PATH")
+	if dbPath == "" {
+		dbPath = "./aks-watcher.db"
+	}
+
 	mockMode := os.Getenv("MOCK_MODE") == "true"
 
-	h := &handler{mockMode: mockMode}
+	db, err := initDB(dbPath)
+	if err != nil {
+		log.Fatalf("init db: %v", err)
+	}
+	defer db.Close()
+
+	h := &handler{mockMode: mockMode, db: db}
 
 	if mockMode {
-		// Skip all Azure initialisation — no credentials or subscription needed.
-		log.Printf("server: listening on :%s | mode: MOCK (no Azure calls)", port)
+		log.Printf("server: listening on :%s | mode: MOCK (no Azure calls) | db: %s", port, dbPath)
 	} else {
 		subscriptionID := os.Getenv("AZURE_SUBSCRIPTION_ID")
 		if subscriptionID == "" {
 			log.Fatal("AZURE_SUBSCRIPTION_ID is required (or set MOCK_MODE=true)")
 		}
-
-		resourceGroup := os.Getenv("AZURE_RESOURCE_GROUP") // optional
+		resourceGroup := os.Getenv("AZURE_RESOURCE_GROUP")
 
 		client, err := newManagedClustersClient(subscriptionID)
 		if err != nil {
 			log.Fatalf("init: %v", err)
 		}
-
 		h.client = client
 		h.resourceGroup = resourceGroup
 
@@ -353,11 +411,12 @@ func main() {
 		if resourceGroup != "" {
 			scope = "resource group " + resourceGroup
 		}
-		log.Printf("server: listening on :%s | mode: LIVE | scope: %s", port, scope)
+		log.Printf("server: listening on :%s | mode: LIVE | scope: %s | db: %s", port, scope, dbPath)
 	}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /aks-watcher/api/clusters/summary", h.handleClustersSummary)
+	mux.HandleFunc("PUT /aks-watcher/api/clusters/live-status", h.handleLiveStatus)
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprint(w, "ok")
 	})
@@ -366,7 +425,7 @@ func main() {
 		Addr:         ":" + port,
 		Handler:      corsMiddleware(mux),
 		ReadTimeout:  10 * time.Second,
-		WriteTimeout: 35 * time.Second, // slightly longer than the Azure call timeout
+		WriteTimeout: 35 * time.Second,
 		IdleTimeout:  120 * time.Second,
 	}
 

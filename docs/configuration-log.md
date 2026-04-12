@@ -39,3 +39,48 @@ kubectl create secret generic aks-watcher-azure-creds \
 ### 3. How it works at runtime
 
 The backend uses `DefaultAzureCredential` from the Azure SDK. When `AZURE_TENANT_ID`, `AZURE_CLIENT_ID`, and `AZURE_CLIENT_SECRET` are present as environment variables, it automatically uses `EnvironmentCredential` (Service Principal auth) without any code change.
+
+---
+
+## Live Status Feature
+
+Clusters can be manually marked as live (actively serving production traffic) through the dashboard UI. This data is not available from the Azure API and is managed locally.
+
+### Storage
+
+Live status is stored in a SQLite database (`modernc.org/sqlite` — pure Go, no CGo required). The database file is created automatically on first startup.
+
+| Environment | DB location |
+|---|---|
+| Local development | `./aks-watcher.db` (current directory) |
+| Kubernetes | `/data/aks-watcher.db` (mounted PersistentVolume) |
+
+### Schema
+
+```sql
+CREATE TABLE live_status (
+    cluster_name    TEXT NOT NULL,
+    resource_group  TEXT NOT NULL,
+    is_live         INTEGER NOT NULL DEFAULT 0,
+    set_live_at     TEXT,
+    planned_live_at TEXT,
+    PRIMARY KEY (cluster_name, resource_group)
+)
+```
+
+### Kubernetes PersistentVolumeClaim
+
+The PVC is declared in `k8s/backend/pvc.yaml` and created automatically by ArgoCD on deploy. It requests 100Mi of storage with `ReadWriteOnce` access mode.
+
+```bash
+# Verify the PVC is bound after ArgoCD syncs
+kubectl get pvc -n aks-watcher
+```
+
+### How the UI works
+
+- Click any cluster card to open the live status modal
+- Toggle "Production live" on/off
+- Optionally set a planned go-live date
+- "Set live on" date is recorded automatically the first time a cluster is marked live and never overwritten
+- Saving calls `PUT /aks-watcher/api/clusters/live-status` and the card refreshes immediately

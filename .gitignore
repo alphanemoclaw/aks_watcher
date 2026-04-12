@@ -26,6 +26,9 @@ frontend/.vite/
 # TypeScript build info cache
 frontend/*.tsbuildinfo
 
+# ─── SQLite database ─────────────────────────────────────────────────────────
+*.db
+
 # ─── Environment & secrets ────────────────────────────────────────────────────
 # Local env files may contain subscription IDs, keys, or tokens
 .env
