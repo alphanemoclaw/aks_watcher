@@ -162,7 +162,7 @@ function LiveStatusModal({ cluster, onClose, onSave }: LiveStatusModalProps) {
 
           {/* Planned live date */}
           <div>
-            <label className="block text-sm font-medium text-gray-700" htmlFor="planned-date">
+            <label className={`block text-sm font-medium ${isLive ? 'text-gray-300' : 'text-gray-700'}`} htmlFor="planned-date">
               Planned go-live date
             </label>
             <input
@@ -170,7 +170,8 @@ function LiveStatusModal({ cluster, onClose, onSave }: LiveStatusModalProps) {
               type="date"
               value={plannedLiveAt}
               onChange={e => setPlannedLiveAt(e.target.value)}
-              className="mt-1.5 block w-full rounded-lg border border-gray-300 px-3 py-2 text-sm shadow-sm focus:border-purple-500 focus:outline-none focus:ring-1 focus:ring-purple-500"
+              disabled={isLive}
+              className="mt-1.5 block w-full rounded-lg border border-gray-300 px-3 py-2 text-sm shadow-sm focus:border-purple-500 focus:outline-none focus:ring-1 focus:ring-purple-500 disabled:cursor-not-allowed disabled:bg-gray-50 disabled:text-gray-300"
             />
           </div>
         </div>
@@ -222,7 +223,7 @@ function ClusterCard({ cluster, onClick }: { cluster: ClusterSummary; onClick: (
         <MetaItem label="Region"      value={cluster.location} />
         <MetaItem label="K8s Version" value={cluster.kubernetes_version} />
         {cluster.is_live && cluster.set_live_at && <MetaItem label="Live since" value={formatDate(cluster.set_live_at)} />}
-        {!cluster.is_live && cluster.planned_live_at && <MetaItem label="Planned live" value={formatDate(cluster.planned_live_at)} />}
+        {!cluster.is_live && cluster.planned_live_at && <MetaItem label="Planned live" value={formatDate(cluster.planned_live_at)} variant="amber" />}
       </dl>
 
       {/* Footer */}
@@ -234,11 +235,11 @@ function ClusterCard({ cluster, onClick }: { cluster: ClusterSummary; onClick: (
   )
 }
 
-function MetaItem({ label, value }: { label: string; value: string }) {
+function MetaItem({ label, value, variant = 'default' }: { label: string; value: string; variant?: 'default' | 'amber' }) {
   return (
     <div>
-      <dt className="text-xs font-medium text-gray-400">{label}</dt>
-      <dd className="mt-0.5 font-medium text-gray-700">{value}</dd>
+      <dt className={`text-xs font-medium ${variant === 'amber' ? 'text-amber-500' : 'text-gray-400'}`}>{label}</dt>
+      <dd className={`mt-0.5 font-medium ${variant === 'amber' ? 'text-amber-600' : 'text-gray-700'}`}>{value}</dd>
     </div>
   )
 }
